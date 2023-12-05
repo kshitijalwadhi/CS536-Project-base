@@ -57,7 +57,7 @@ class Client:
                 req_dropped: bool = resp.req_dropped
 
                 if req_dropped:
-                    print("Request dropped")
+                    print("Request with sequence number was {} dropped".format(sequence_number))
                     cv2.imshow("Result", img)
                 else:
                     result = pickle.loads(resp.bboxes.data)
