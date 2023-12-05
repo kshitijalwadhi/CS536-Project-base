@@ -10,7 +10,7 @@ class Client:
         self.stub = object_detection_pb2_grpc.DetectorStub(self.channel)
 
         req = InitRequest()
-        resp = self.stub.init_client(req)
+        resp: InitResponse = self.stub.init_client(req)
         self.client_id = resp.client_id
 
         print("Client ID: {}".format(self.client_id))
@@ -19,7 +19,7 @@ class Client:
 
     def close_connection(self):
         req = CloseRequest(client_id=self.client_id)
-        resp = self.stub.close_connection(req)
+        resp: CloseResponse = self.stub.close_connection(req)
         print("Close connection for client: {}".format(resp.client_id))
 
 
