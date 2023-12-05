@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package object_detection;
+
+service Detector {
+  rpc init_client(InitRequest) returns (InitResponse) {}
+  rpc close_connection(CloseRequest) returns (CloseResponse) {}
+  rpc detect(DetectRequest) returns (DetectResponse) {}
+}
+
+message InitRequest {}
+message InitResponse { int32 client_id = 1; }
+
+message CloseRequest { int32 client_id = 1; }
+message CloseResponse { int32 client_id = 1; }
+
+message DetectRequest {
+  int32 client_id = 1;
+  int32 fps = 2;
+  int32 sequence_number = 3;
+  bytes frame_data = 4;
+}
+
+message BBoxes { bytes data = 1; }
+
+message DetectResponse {
+  int32 client_id = 1;
+  int32 sequence_number = 2;
+  bool req_dropped = 3; // if true, the request was dropped
+  BBoxes bboxes = 4;
+}
