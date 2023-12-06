@@ -7,7 +7,7 @@ from object_detection_pb2 import InitRequest, InitResponse, CloseRequest, CloseR
 from threading import Lock
 from concurrent import futures
 
-from utilities.constants import MAX_CAMERAS, IMG_SIZE, BW
+from utilities.constants import MAX_CAMERAS, IMG_SIZE, BW, PAST_SCORE_N, MAX_TOTAL_FPS, MIN_THRESHOLD_EACH
 
 from object_detector import ObjectDetector
 
@@ -17,7 +17,7 @@ import pickle
 import cv2
 
 import numpy as np
-from pulp import *
+from pulp import LpMaximize, LpProblem, LpVariable, lpSum, LpStatus, PULP_CBC_CMD
 
 
 class Server(object_detection_pb2_grpc.DetectorServicer):
@@ -54,27 +54,42 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         return CloseResponse(client_id=request.client_id)
 
     def update_prob_dropping(self):
-        # TODO: This function decides the probability of dropping a request, basically the BW allocation
-        if self.current_load > BW:
-            print("Current load is {}, exceeding BW: {}".format(self.current_load, BW))
 
-            model = pulp.LpProblem('linear_programming', LpMaximize)
-            solver = getSolver('PULP_CBC_CMD')
-            vars = {}
-            for key, value in self.connected_clients.items():
-                vars[key] = LpVariable('x_'+str(key), lowBound = 1, cat = 'continuous')
+        print("Current load is {}, BW: {}".format(self.current_load, BW))
 
-            sorted_clients = sorted(self.connected_clients.items(), key=lambda x: x[1]["utilization"], reverse=True)
-            top_client = sorted_clients[0][0]
-            self.prob_dropping[top_client] = 0.5
-            print("Client {} probability of dropping has been updated to: ".format(top_client), self.prob_dropping[top_client])
-        else:
-            print("Current load is {}, within BW: {}".format(self.current_load, BW))
-            sorted_prob_dropping = sorted(self.prob_dropping.items(), key=lambda x: x[1], reverse=True)
-            top_client = sorted_prob_dropping[0][0]
-            if self.prob_dropping[top_client] > 0:
-                self.prob_dropping[top_client] = 0
-                print("Client {} probability of dropping has been updated to: ".format(top_client), self.prob_dropping[top_client])
+        prob = LpProblem("BandwidthAllocation", LpMaximize)
+        fps_vars = {client_id: LpVariable(f'fps_{client_id}', lowBound=1, upBound=100, cat='continuous')
+                for client_id in self.connected_clients}
+        requested_fps = {client_id: client['fps'] for client_id, client in self.connected_clients.items()}
+        accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
+                    for client_id in self.connected_clients}
+
+        #objective
+        prob += lpSum([fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] 
+                    for client_id in self.connected_clients])
+
+        #BW constraint
+        prob += lpSum([fps_vars[client_id] * self.connected_clients[client_id]['size_each_frame']
+                    for client_id in self.connected_clients]) <= BW
+        
+        #total fps capped
+        prob += lpSum([fps_vars[client_id] for client_id in self.connected_clients]) <= MAX_TOTAL_FPS
+        
+        #each fps capped
+        for client_id in self.connected_clients:
+            prob += fps_vars[client_id] <= self.connected_clients[client_id]['fps']
+
+        #each performance min capped
+        for client_id in self.connected_clients:
+            prob += fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] >= MIN_THRESHOLD_EACH
+
+        results = prob.solve(PULP_CBC_CMD(msg=0))
+        if LpStatus[results] == 'Optimal':
+            for client_id in self.connected_clients:
+                if fps_vars[client_id].varValue is not None:
+                    self.prob_dropping[client_id] = 1.0 - fps_vars[client_id].varValue / requested_fps[client_id]
+                    print("Client {} probability of dropping has been updated to: ".format(client_id), self.prob_dropping[client_id])
+        
 
     def detect(self, request: DetectRequest, context):
         with self.lock:
