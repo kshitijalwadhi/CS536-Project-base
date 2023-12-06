@@ -16,6 +16,9 @@ import random
 import pickle
 import cv2
 
+import numpy as np
+from pulp import *
+
 
 class Server(object_detection_pb2_grpc.DetectorServicer):
     def __init__(self, detector=None):
@@ -54,6 +57,13 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         # TODO: This function decides the probability of dropping a request, basically the BW allocation
         if self.current_load > BW:
             print("Current load is {}, exceeding BW: {}".format(self.current_load, BW))
+
+            model = pulp.LpProblem('linear_programming', LpMaximize)
+            solver = getSolver('PULP_CBC_CMD')
+            vars = {}
+            for key, value in self.connected_clients.items():
+                vars[key] = LpVariable('x_'+str(key), lowBound = 1, cat = 'continuous')
+
             sorted_clients = sorted(self.connected_clients.items(), key=lambda x: x[1]["utilization"], reverse=True)
             top_client = sorted_clients[0][0]
             self.prob_dropping[top_client] = 0.5
