@@ -1,3 +1,7 @@
+from pulp import LpMaximize, LpProblem, LpVariable, lpSum, LpStatus, PULP_CBC_CMD
+import numpy as np
+import threading
+import matplotlib.pyplot as plt
 import grpc
 
 import object_detection_pb2_grpc
@@ -7,7 +11,7 @@ from object_detection_pb2 import InitRequest, InitResponse, CloseRequest, CloseR
 from threading import Lock
 from concurrent import futures
 
-from utilities.constants import MAX_CAMERAS, IMG_SIZE, BW, PAST_SCORE_N, MAX_TOTAL_FPS, MIN_THRESHOLD_EACH
+from utilities.constants import MAX_CAMERAS, IMG_SIZE, BW, PAST_SCORE_N, MIN_THRESHOLD_EACH
 
 from object_detector import ObjectDetector
 
@@ -18,15 +22,12 @@ import cv2
 
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
-import threading
 
-import numpy as np
-from pulp import LpMaximize, LpProblem, LpVariable, lpSum, LpStatus, PULP_CBC_CMD
-
+USE_LP_OPTIMIZATION = True
 
 ADJUSTED_THRESHOLD = MIN_THRESHOLD_EACH
+
 
 class Server(object_detection_pb2_grpc.DetectorServicer):
     def __init__(self, detector=None):
@@ -88,12 +89,11 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         plt.subplot(3, 2, 1)
         total_bandwidth = [sum(values) for values in zip(*self.bandwidths.values())]
         averaged_bw = [np.mean(total_bandwidth[i:i+5]) for i in range(0, len(total_bandwidth), 5)]
-        
+
         plt.plot(averaged_bw)
         plt.title('Total Bandwidth over Time')
         plt.xlabel('Time')
         plt.ylabel('Total Bandwidth')
-
 
         # Plotting Accuracy of Each Client
         plt.subplot(3, 2, 2)
@@ -152,9 +152,8 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         handles, labels = plt.gca().get_legend_handles_labels()
         fig.legend(handles, labels, loc='lower right')
 
-
         plt.tight_layout()
-        
+
         # Save the plot to a file
         plt.savefig('./server_metrics.png')
         print("Plot saved to 'server_metrics.png'")
@@ -166,48 +165,69 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
 
         prob = LpProblem("BandwidthAllocation", LpMaximize)
         fps_vars = {client_id: LpVariable(f'fps_{client_id}', lowBound=1, upBound=100, cat='Continuous')
-                for client_id in self.connected_clients}
+                    for client_id in self.connected_clients}
         requested_fps = {client_id: client['fps'] for client_id, client in self.connected_clients.items()}
         accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
                     for client_id in self.connected_clients}
-        
+
         for client_id in accuracy.keys():
             self.od_scores[client_id].append(accuracy[client_id])
             self.accuracies[client_id].append(accuracy[client_id]*(1-self.prob_dropping[client_id]))
 
-        #add feature to drop clients with accuracy or performance below a certain number (min bound = accu_thresh*1/request_fps)
+        # add feature to drop clients with accuracy or performance below a certain number (min bound = accu_thresh*1/request_fps)
         for client_id in requested_fps:
-            if self.verbose: print("id: ", client_id, " fps: ", requested_fps[client_id], " accuracy: ", accuracy[client_id])
+            if self.verbose:
+                print("id: ", client_id, " fps: ", requested_fps[client_id], " accuracy: ", accuracy[client_id])
 
-        #objective
-        prob += lpSum([fps_vars[client_id] * 1 / requested_fps[client_id] 
-                    for client_id in self.connected_clients])
+        # objective
+        prob += lpSum([fps_vars[client_id] * 1 / requested_fps[client_id]
+                       for client_id in self.connected_clients])
 
-        #BW constraint
+        # BW constraint
         prob += lpSum([fps_vars[client_id] * self.connected_clients[client_id]['size_each_frame']
-                    for client_id in self.connected_clients]) <= BW
-        
+                       for client_id in self.connected_clients]) <= BW
+
         # #total fps capped
         # prob += lpSum([fps_vars[client_id] for client_id in self.connected_clients]) <= MAX_TOTAL_FPS
 
         ADJUSTED_THRESHOLD = MIN_THRESHOLD_EACH * np.exp(-len(self.connected_clients)/10)
-        
+
         # #each fps capped
         for client_id in self.connected_clients:
             prob += fps_vars[client_id] <= self.connected_clients[client_id]['fps']
 
-        #each performance min capped
+        # each performance min capped
         for client_id in self.connected_clients:
             prob += fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] >= ADJUSTED_THRESHOLD
 
         results = prob.solve(PULP_CBC_CMD(msg=0))
-        #if self.verbose: print(prob)
+        # if self.verbose: print(prob)
         if LpStatus[results] == 'Optimal':
             for client_id in self.connected_clients:
                 if fps_vars[client_id].varValue is not None:
                     self.prob_dropping[client_id] = 1.0 - fps_vars[client_id].varValue / requested_fps[client_id]
                     print("Client {} probability of dropping has been updated to: ".format(client_id), self.prob_dropping[client_id])
-        
+
+    def update_prob_dropping_simple(self):
+        total_utilization = 0
+        for client_id in self.connected_clients:
+            total_utilization += self.connected_clients[client_id]["utilization"]
+
+        for client_id in self.connected_clients:
+            u_i = self.connected_clients[client_id]["utilization"]
+            bw_i = u_i / total_utilization * BW
+            p_i = max(0, 1 - bw_i/u_i)
+            self.prob_dropping[client_id] = p_i
+
+        accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
+                    for client_id in self.connected_clients}
+
+        for client_id in accuracy.keys():
+            self.od_scores[client_id].append(accuracy[client_id])
+            self.accuracies[client_id].append(accuracy[client_id]*(1-self.prob_dropping[client_id]))
+
+        for client_id, prob in self.prob_dropping.items():
+            print("Client: {client_id}, fps: {fps}, prob: {prob}".format(client_id=client_id, fps=self.connected_clients[client_id]["fps"], prob=prob))
 
     def detect(self, request: DetectRequest, context):
         with self.lock:
@@ -221,12 +241,15 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
                 self.current_load += load
                 self.bandwidths[client_id].append(load)
                 self.probs[client_id].append(self.prob_dropping[client_id])
-            self.update_prob_dropping()
+
+            if USE_LP_OPTIMIZATION:
+                self.update_prob_dropping()
+            else:
+                self.update_prob_dropping_simple()
 
         if random.random() < self.prob_dropping[request.client_id]:
-            #self.past_scores[request.client_id].append(0) #dont add zero if dropped
-            with self.lock:
-                self.current_load -= self.connected_clients[request.client_id]["utilization"] * self.prob_dropping[request.client_id] #????
+            if not USE_LP_OPTIMIZATION:
+                self.past_scores[request.client_id].append(0)
             res = DetectResponse(
                 client_id=request.client_id,
                 sequence_number=request.sequence_number,
@@ -250,9 +273,6 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             bboxes=bboxes
         )
 
-        with self.lock:
-            self.current_load -= self.connected_clients[request.client_id]["utilization"] * (1-self.prob_dropping[request.client_id])#???
-
         return res
 
 
@@ -261,12 +281,12 @@ def start_plotting_thread(server_instance, interval=5):
         while not stop_plotting_thread.is_set():
             time.sleep(interval)
             server_instance.plot_metrics()
-            
 
     stop_plotting_thread = threading.Event()
     plotting_thread = threading.Thread(target=plot)
     plotting_thread.start()
     return stop_plotting_thread, plotting_thread
+
 
 if __name__ == '__main__':
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=MAX_CAMERAS))
