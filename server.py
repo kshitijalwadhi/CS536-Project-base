@@ -29,6 +29,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         self.current_load = 0
         self.prob_dropping = {}  # This is what will control our BW allocation
         self.past_scores = {}
+        self.verbose = 1
 
     def init_client(self, request: InitRequest, context):
         with self.lock:
@@ -36,9 +37,9 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             while client_id in self.connected_clients:
                 client_id = random.randint(1, MAX_CAMERAS)
             self.connected_clients[client_id] = {
-                "fps": 0,
-                "size_each_frame": 0,
-                "utilization": 0
+                "fps": 1,
+                "size_each_frame": 1024,
+                "utilization": 1024
             }
             self.prob_dropping[client_id] = 0
             self.past_scores[client_id] = []
@@ -64,8 +65,9 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
                     for client_id in self.connected_clients}
 
+        #add feature to drop clients with accuracy or performance below a certain number (min bound = accu_thresh*1/request_fps)
         for client_id in requested_fps:
-            print("id: ", client_id, " fps: ", requested_fps[client_id], " accuracy: ", accuracy[client_id])
+            if self.verbose: print("id: ", client_id, " fps: ", requested_fps[client_id], " accuracy: ", accuracy[client_id])
 
         #objective
         prob += lpSum([fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] 
@@ -87,7 +89,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             prob += fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] >= MIN_THRESHOLD_EACH
 
         results = prob.solve(PULP_CBC_CMD(msg=0))
-        print(prob)
+        if self.verbose: print(prob)
         if LpStatus[results] == 'Optimal':
             for client_id in self.connected_clients:
                 if fps_vars[client_id].varValue is not None:
@@ -108,7 +110,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             self.update_prob_dropping()
 
         if random.random() < self.prob_dropping[request.client_id]:
-            self.past_scores[request.client_id].append(0)
+            # self.past_scores[request.client_id].append(0) #dont add zero if dropped
             with self.lock:
                 self.current_load -= self.connected_clients[request.client_id]["utilization"] * self.prob_dropping[request.client_id] #????
             res = DetectResponse(
