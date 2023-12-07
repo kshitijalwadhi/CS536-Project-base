@@ -45,6 +45,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             }
             self.prob_dropping[client_id] = 0
             self.past_scores[client_id] = []
+            self.past_scores[client_id].append(1)
         print("Client with ID {} connected".format(client_id))
         return InitResponse(client_id=client_id)
 
