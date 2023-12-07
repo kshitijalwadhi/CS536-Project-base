@@ -17,7 +17,7 @@ import pickle
 import cv2
 
 import numpy as np
-from pulp import LpMaximize, LpProblem, LpVariable, lpSum, LpStatus, PULP_CBC_CMD
+from pulp import LpMaximize, LpProblem, LpVariable, lpSum, LpStatus, PULP_CBC_CMD, LpMinimize
 
 
 class Server(object_detection_pb2_grpc.DetectorServicer):
@@ -57,40 +57,39 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
 
         print("Current load is {}, BW: {}".format(self.current_load, BW))
 
-        prob = LpProblem("BandwidthAllocation", LpMaximize)
-        fps_vars = {client_id: LpVariable(f'fps_{client_id}', lowBound=10, upBound=100, cat='continuous')
-                for client_id in self.connected_clients}
-        requested_fps = {client_id: client['fps'] for client_id, client in self.connected_clients.items()}
-        print(requested_fps)
+        prob = LpProblem("BandwidthAllocation", LpMinimize)
+        prob_vars = {client_id: LpVariable(f'prob_{client_id}', lowBound=0, upBound=0.9, cat='continuous')
+                     for client_id in self.connected_clients}
         accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
                     for client_id in self.connected_clients}
 
-        #objective
-        prob += lpSum([fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] 
-                    for client_id in self.connected_clients]) <= BW
+        print("len prob vars: ", len(prob_vars))
 
-        #BW constraint
-        # prob += lpSum([fps_vars[client_id] * self.connected_clients[client_id]['size_each_frame']
-        #             for client_id in self.connected_clients]) <= BW
-        
-        #total fps capped
-        #prob += lpSum([fps_vars[client_id] for client_id in self.connected_clients]) <= MAX_TOTAL_FPS
-        
-        #each fps capped
-        for client_id in self.connected_clients:
-            prob += fps_vars[client_id] <= 100
+        bw_arr = [self.connected_clients[client_id]["utilization"] * (1 - prob_vars[client_id]) for client_id in self.connected_clients]
+        # min_score_arr = [accuracy[client_id] * (1 - prob_vars[client_id]) / len(self.connected_clients) for client_id in self.connected_clients]
 
-        #each performance min capped
+        print("BW array: ", bw_arr)
+        # print("Min score array: ", min_score_arr)
+
+        prob += lpSum(bw_arr) <= BW
+
+        # prob += lpSum(min_score_arr) >= MIN_THRESHOLD_EACH
+
         for client_id in self.connected_clients:
-            #prob += fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] >= MIN_THRESHOLD_EACH
-            prob += fps_vars[client_id] >= 10
+            prob += (1-prob_vars[client_id]) * accuracy[client_id] >= MIN_THRESHOLD_EACH
 
         results = prob.solve(PULP_CBC_CMD(msg=0))
         print(LpStatus[results])
+        # print(prob_vars)
         if LpStatus[results] == 'Optimal':
             for client_id in self.connected_clients:
-                self.prob_dropping[client_id] = 1.0 - fps_vars[client_id].varValue / requested_fps[client_id]
-                print("Client {} probability of dropping has been updated to: ".format(client_id), self.prob_dropping[client_id])     
+                if prob_vars[client_id].varValue is None:
+                    print("ouaaa")
+                if prob_vars[client_id].varValue is not None:
+                    self.prob_dropping[client_id] = prob_vars[client_id].varValue
+
+        for client_id in self.connected_clients:
+            print("Client {} probability: ".format(client_id), self.prob_dropping[client_id])
 
     def detect(self, request: DetectRequest, context):
         with self.lock:
@@ -100,6 +99,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
 
             self.current_load = 0
             for client_id in self.connected_clients:
+                print(self.prob_dropping)
                 self.current_load += self.connected_clients[client_id]["utilization"] * (1-self.prob_dropping[client_id])
 
             try:
