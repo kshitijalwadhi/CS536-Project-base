@@ -58,11 +58,14 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         print("Current load is {}, BW: {}".format(self.current_load, BW))
 
         prob = LpProblem("BandwidthAllocation", LpMaximize)
-        fps_vars = {client_id: LpVariable(f'fps_{client_id}', lowBound=1, upBound=100, cat='continuous')
+        fps_vars = {client_id: LpVariable(f'fps_{client_id}', lowBound=1, upBound=100, cat='Continuous')
                 for client_id in self.connected_clients}
         requested_fps = {client_id: client['fps'] for client_id, client in self.connected_clients.items()}
         accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
                     for client_id in self.connected_clients}
+
+        for client_id in requested_fps:
+            print("id: ", client_id, " fps: ", requested_fps[client_id], " accuracy: ", accuracy[client_id])
 
         #objective
         prob += lpSum([fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] 
@@ -84,6 +87,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             prob += fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] >= MIN_THRESHOLD_EACH
 
         results = prob.solve(PULP_CBC_CMD(msg=0))
+        print(prob)
         if LpStatus[results] == 'Optimal':
             for client_id in self.connected_clients:
                 if fps_vars[client_id].varValue is not None:
@@ -106,7 +110,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         if random.random() < self.prob_dropping[request.client_id]:
             self.past_scores[request.client_id].append(0)
             with self.lock:
-                self.current_load -= self.connected_clients[request.client_id]["utilization"] * self.prob_dropping[request.client_id]
+                self.current_load -= self.connected_clients[request.client_id]["utilization"] * self.prob_dropping[request.client_id] #????
             res = DetectResponse(
                 client_id=request.client_id,
                 sequence_number=request.sequence_number,
@@ -131,7 +135,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         )
 
         with self.lock:
-            self.current_load -= self.connected_clients[request.client_id]["utilization"] * (1-self.prob_dropping[request.client_id])
+            self.current_load -= self.connected_clients[request.client_id]["utilization"] * (1-self.prob_dropping[request.client_id])#???
 
         return res
 
