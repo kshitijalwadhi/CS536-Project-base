@@ -58,38 +58,39 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         print("Current load is {}, BW: {}".format(self.current_load, BW))
 
         prob = LpProblem("BandwidthAllocation", LpMaximize)
-        fps_vars = {client_id: LpVariable(f'fps_{client_id}', lowBound=1, upBound=100, cat='continuous')
+        fps_vars = {client_id: LpVariable(f'fps_{client_id}', lowBound=10, upBound=100, cat='continuous')
                 for client_id in self.connected_clients}
         requested_fps = {client_id: client['fps'] for client_id, client in self.connected_clients.items()}
+        print(requested_fps)
         accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
                     for client_id in self.connected_clients}
 
         #objective
         prob += lpSum([fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] 
-                    for client_id in self.connected_clients])
+                    for client_id in self.connected_clients]) <= BW
 
         #BW constraint
-        prob += lpSum([fps_vars[client_id] * self.connected_clients[client_id]['size_each_frame']
-                    for client_id in self.connected_clients]) <= BW
+        # prob += lpSum([fps_vars[client_id] * self.connected_clients[client_id]['size_each_frame']
+        #             for client_id in self.connected_clients]) <= BW
         
         #total fps capped
-        prob += lpSum([fps_vars[client_id] for client_id in self.connected_clients]) <= MAX_TOTAL_FPS
+        #prob += lpSum([fps_vars[client_id] for client_id in self.connected_clients]) <= MAX_TOTAL_FPS
         
         #each fps capped
         for client_id in self.connected_clients:
-            prob += fps_vars[client_id] <= self.connected_clients[client_id]['fps']
+            prob += fps_vars[client_id] <= 100
 
         #each performance min capped
         for client_id in self.connected_clients:
-            prob += fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] >= MIN_THRESHOLD_EACH
+            #prob += fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] >= MIN_THRESHOLD_EACH
+            prob += fps_vars[client_id] >= 10
 
         results = prob.solve(PULP_CBC_CMD(msg=0))
+        print(LpStatus[results])
         if LpStatus[results] == 'Optimal':
             for client_id in self.connected_clients:
-                if fps_vars[client_id].varValue is not None:
-                    self.prob_dropping[client_id] = 1.0 - fps_vars[client_id].varValue / requested_fps[client_id]
-                    print("Client {} probability of dropping has been updated to: ".format(client_id), self.prob_dropping[client_id])
-        
+                self.prob_dropping[client_id] = 1.0 - fps_vars[client_id].varValue / requested_fps[client_id]
+                print("Client {} probability of dropping has been updated to: ".format(client_id), self.prob_dropping[client_id])     
 
     def detect(self, request: DetectRequest, context):
         with self.lock:
@@ -101,7 +102,10 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             for client_id in self.connected_clients:
                 self.current_load += self.connected_clients[client_id]["utilization"] * (1-self.prob_dropping[client_id])
 
-            self.update_prob_dropping()
+            try:
+                self.update_prob_dropping()
+            except Exception as e:
+                print(e)
 
         if random.random() < self.prob_dropping[request.client_id]:
             self.past_scores[request.client_id].append(0)
