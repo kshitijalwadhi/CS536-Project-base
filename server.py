@@ -20,6 +20,8 @@ import numpy as np
 from pulp import LpMaximize, LpProblem, LpVariable, lpSum, LpStatus, PULP_CBC_CMD
 
 
+ADJUSTED_THRESHOLD = MIN_THRESHOLD_EACH
+
 class Server(object_detection_pb2_grpc.DetectorServicer):
     def __init__(self, detector=None):
         super(Server, self).__init__()
@@ -70,26 +72,28 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             if self.verbose: print("id: ", client_id, " fps: ", requested_fps[client_id], " accuracy: ", accuracy[client_id])
 
         #objective
-        prob += lpSum([fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] 
+        prob += lpSum([fps_vars[client_id] * 1 / requested_fps[client_id] 
                     for client_id in self.connected_clients])
 
         #BW constraint
         prob += lpSum([fps_vars[client_id] * self.connected_clients[client_id]['size_each_frame']
                     for client_id in self.connected_clients]) <= BW
         
-        #total fps capped
-        prob += lpSum([fps_vars[client_id] for client_id in self.connected_clients]) <= MAX_TOTAL_FPS
+        # #total fps capped
+        # prob += lpSum([fps_vars[client_id] for client_id in self.connected_clients]) <= MAX_TOTAL_FPS
+
+        ADJUSTED_THRESHOLD = MIN_THRESHOLD_EACH * np.exp(-len(self.connected_clients)/10)
         
-        #each fps capped
+        # #each fps capped
         for client_id in self.connected_clients:
             prob += fps_vars[client_id] <= self.connected_clients[client_id]['fps']
 
         #each performance min capped
         for client_id in self.connected_clients:
-            prob += fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] >= MIN_THRESHOLD_EACH
+            prob += fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] >= ADJUSTED_THRESHOLD
 
         results = prob.solve(PULP_CBC_CMD(msg=0))
-        if self.verbose: print(prob)
+        #if self.verbose: print(prob)
         if LpStatus[results] == 'Optimal':
             for client_id in self.connected_clients:
                 if fps_vars[client_id].varValue is not None:
@@ -110,7 +114,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             self.update_prob_dropping()
 
         if random.random() < self.prob_dropping[request.client_id]:
-            # self.past_scores[request.client_id].append(0) #dont add zero if dropped
+            #self.past_scores[request.client_id].append(0) #dont add zero if dropped
             with self.lock:
                 self.current_load -= self.connected_clients[request.client_id]["utilization"] * self.prob_dropping[request.client_id] #????
             res = DetectResponse(
