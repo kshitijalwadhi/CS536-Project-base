@@ -16,6 +16,12 @@ import random
 import pickle
 import cv2
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+import threading
+
 import numpy as np
 from pulp import LpMaximize, LpProblem, LpVariable, lpSum, LpStatus, PULP_CBC_CMD
 
@@ -30,8 +36,14 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         self.lock = Lock()
         self.current_load = 0
         self.prob_dropping = {}  # This is what will control our BW allocation
+        self.probs = {}
         self.past_scores = {}
+        self.accuracies = {}
+        self.od_scores = {}
         self.verbose = 1
+        self.bandwidths = {}
+        self.server_start_time = time.time()
+        self.start_times = {}
 
     def init_client(self, request: InitRequest, context):
         with self.lock:
@@ -45,7 +57,16 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             }
             self.prob_dropping[client_id] = 0
             self.past_scores[client_id] = []
-            self.past_scores[client_id].append(1)
+            self.past_scores[client_id].append(0)
+            self.od_scores[client_id] = []
+            self.od_scores[client_id].append(1)
+            self.accuracies[client_id] = []
+            self.accuracies[client_id].append(1)
+            self.bandwidths[client_id] = []
+            self.bandwidths[client_id].append(0)
+            self.probs[client_id] = []
+            self.probs[client_id].append(0)
+            self.start_times[client_id] = time.time() - self.server_start_time
         print("Client with ID {} connected".format(client_id))
         return InitResponse(client_id=client_id)
 
@@ -57,6 +78,88 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         print("Client with ID {} disconnected".format(request.client_id))
         return CloseResponse(client_id=request.client_id)
 
+    def plot_metrics(self):
+        # Ensure this function is called periodically in the server's main loop or a separate thread.
+
+        # Create a figure with two subplots
+        fig = plt.figure(figsize=(12, 6))
+
+        # Plotting Object Detection Scores
+        plt.subplot(3, 2, 1)
+        total_bandwidth = [sum(values) for values in zip(*self.bandwidths.values())]
+        averaged_bw = [np.mean(total_bandwidth[i:i+5]) for i in range(0, len(total_bandwidth), 5)]
+        
+        plt.plot(averaged_bw)
+        plt.title('Total Bandwidth over Time')
+        plt.xlabel('Time')
+        plt.ylabel('Total Bandwidth')
+
+
+        # Plotting Accuracy of Each Client
+        plt.subplot(3, 2, 2)
+        for client_id, acc in self.accuracies.items():
+            relative_start_time = self.start_times.get(client_id, 0)
+            averaged_acc = [np.mean(acc[i:i+5]) for i in range(0, len(acc), 5)]
+            num_chunks = len(averaged_acc)
+            time_offsets = [relative_start_time + i for i in range(num_chunks)]
+            fps = self.connected_clients[client_id]['fps']
+            plt.plot(time_offsets, averaged_acc, label=f'Client FPS: {fps}')
+
+        plt.title('Accuracy of Each Client')
+        plt.xlabel('Time')
+        plt.ylabel('Accuracy')
+
+        # Plotting Bandwidth of Each Client
+        plt.subplot(3, 2, 3)
+        for client_id, bw in self.bandwidths.items():
+            relative_start_time = self.start_times.get(client_id, 0)
+            averaged_bw = [np.mean(bw[i:i+5]) for i in range(0, len(bw), 5)]
+            num_chunks = len(averaged_bw)
+            time_offsets = [relative_start_time + i for i in range(num_chunks)]
+            fps = self.connected_clients[client_id]['fps']
+            plt.plot(time_offsets, averaged_bw, label=f'Client FPS: {fps}')
+
+        plt.title('Bandwidth of Each Client')
+        plt.xlabel('Time')
+        plt.ylabel('Bandwidth')
+
+        plt.subplot(3, 2, 4)
+        for client_id, score in self.od_scores.items():
+            relative_start_time = self.start_times.get(client_id, 0)
+            averaged_scores = [np.mean(score[i:i+5]) for i in range(0, len(score), 5)]
+            num_chunks = len(averaged_scores)
+            time_offsets = [relative_start_time + i for i in range(num_chunks)]
+            fps = self.connected_clients[client_id]['fps']
+            plt.plot(time_offsets, averaged_scores, label=f'Client FPS: {fps}')
+
+        plt.title('Object Detection Scores of Each Client')
+        plt.xlabel('Time')
+        plt.ylabel('Score')
+
+        plt.subplot(3, 2, 5)
+        for client_id, prob in self.probs.items():
+            relative_start_time = self.start_times.get(client_id, 0)
+            averaged_prob = [np.mean(prob[i:i+5]) for i in range(0, len(prob), 5)]
+            num_chunks = len(averaged_prob)
+            time_offsets = [relative_start_time + i for i in range(num_chunks)]
+            fps = self.connected_clients[client_id]['fps']
+            plt.plot(time_offsets, averaged_prob, label=f'Client FPS: {fps}')
+
+        plt.title('Probability of Dropping a Packet')
+        plt.xlabel('Time')
+        plt.ylabel('Probability')
+
+        handles, labels = plt.gca().get_legend_handles_labels()
+        fig.legend(handles, labels, loc='lower right')
+
+
+        plt.tight_layout()
+        
+        # Save the plot to a file
+        plt.savefig('./server_metrics.png')
+        print("Plot saved to 'server_metrics.png'")
+        plt.close()
+
     def update_prob_dropping(self):
 
         print("Current load is {}, BW: {}".format(self.current_load, BW))
@@ -67,6 +170,10 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         requested_fps = {client_id: client['fps'] for client_id, client in self.connected_clients.items()}
         accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
                     for client_id in self.connected_clients}
+        
+        for client_id in accuracy.keys():
+            self.od_scores[client_id].append(accuracy[client_id])
+            self.accuracies[client_id].append(accuracy[client_id]*(1-self.prob_dropping[client_id]))
 
         #add feature to drop clients with accuracy or performance below a certain number (min bound = accu_thresh*1/request_fps)
         for client_id in requested_fps:
@@ -110,8 +217,10 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
 
             self.current_load = 0
             for client_id in self.connected_clients:
-                self.current_load += self.connected_clients[client_id]["utilization"] * (1-self.prob_dropping[client_id])
-
+                load = self.connected_clients[client_id]["utilization"] * (1-self.prob_dropping[client_id])
+                self.current_load += load
+                self.bandwidths[client_id].append(load)
+                self.probs[client_id].append(self.prob_dropping[client_id])
             self.update_prob_dropping()
 
         if random.random() < self.prob_dropping[request.client_id]:
@@ -147,14 +256,31 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         return res
 
 
+def start_plotting_thread(server_instance, interval=5):
+    def plot():
+        while not stop_plotting_thread.is_set():
+            time.sleep(interval)
+            server_instance.plot_metrics()
+            
+
+    stop_plotting_thread = threading.Event()
+    plotting_thread = threading.Thread(target=plot)
+    plotting_thread.start()
+    return stop_plotting_thread, plotting_thread
+
 if __name__ == '__main__':
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=MAX_CAMERAS))
-    object_detection_pb2_grpc.add_DetectorServicer_to_server(Server(detector=ObjectDetector()), server)
+    od_server = Server(detector=ObjectDetector())
+    object_detection_pb2_grpc.add_DetectorServicer_to_server(od_server, server)
     server.add_insecure_port('[::]:50051')
     server.start()
+    stop_event, plotting_thread = start_plotting_thread(od_server)
     print("Server started at port 50051")
     try:
         while True:
             time.sleep(86400)
     except KeyboardInterrupt:
+        server.stop(0)
+        stop_event.set()  # Signal the plotting thread to stop
+        plotting_thread.join()  # Wait for the plotting thread to finish
         server.stop(0)
