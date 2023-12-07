@@ -11,6 +11,7 @@ import time
 from imutils.video import FileVideoStream
 import cv2
 import pickle
+import sys
 
 
 class Client:
@@ -77,6 +78,7 @@ class Client:
 
 
 if __name__ == '__main__':
-    client = Client('localhost:50051', 30)
+    fps = int(sys.argv[1])
+    client = Client('localhost:50051', fps)
     client.send_video()
     client.close_connection()
