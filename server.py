@@ -24,7 +24,7 @@ import matplotlib
 matplotlib.use('Agg')
 
 
-USE_LP_OPTIMIZATION = False
+USE_LP_OPTIMIZATION = True
 
 ADJUSTED_THRESHOLD = MIN_THRESHOLD_EACH
 
