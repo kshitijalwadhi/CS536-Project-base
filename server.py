@@ -1,3 +1,7 @@
+from pulp import LpMaximize, LpProblem, LpVariable, lpSum, LpStatus, PULP_CBC_CMD
+import numpy as np
+import threading
+import matplotlib.pyplot as plt
 import grpc
 
 import object_detection_pb2_grpc
@@ -7,19 +11,22 @@ from object_detection_pb2 import InitRequest, InitResponse, CloseRequest, CloseR
 from threading import Lock
 from concurrent import futures
 
-from utilities.constants import MAX_CAMERAS, IMG_SIZE, BW
+from utilities.constants import MAX_CAMERAS, IMG_SIZE, BW, PAST_SCORE_N, MIN_THRESHOLD_EACH
 
 from object_detector import ObjectDetector
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 
-import numpy as np
 import time
 import random
 import pickle
 import cv2
-import threading
+
+import matplotlib
+matplotlib.use('Agg')
+
+
+USE_LP_OPTIMIZATION = True
+
+ADJUSTED_THRESHOLD = MIN_THRESHOLD_EACH
 
 
 class Server(object_detection_pb2_grpc.DetectorServicer):
@@ -27,12 +34,21 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         super(Server, self).__init__()
         self.detector = detector
         self.connected_clients = {}
+        self.connected_clients_plotting = {}
         self.lock = Lock()
         self.current_load = 0
         self.prob_dropping = {}  # This is what will control our BW allocation
+        self.probs = {}
         self.past_scores = {}
+        self.accuracies = {}
+        self.od_scores = {}
+        self.verbose = 1
+        self.total_bandwidth = []
+        self.bandwidths = {}
         self.server_start_time = time.time()
         self.start_times = {}
+        self.client_times = {}
+        self.server_times = []
 
     def init_client(self, request: InitRequest, context):
         with self.lock:
@@ -40,55 +56,34 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             while client_id in self.connected_clients:
                 client_id = random.randint(1, MAX_CAMERAS)
             self.connected_clients[client_id] = {
-                "fps": 0,
-                "size_each_frame": 0,
-                "utilization": 0
+                "fps": 1,
+                "size_each_frame": 1024,
+                "utilization": 1024
+            }
+            self.connected_clients_plotting[client_id] = {
+                "fps": 1,
+                "size_each_frame": 1024,
+                "utilization": 1024
             }
             self.prob_dropping[client_id] = 0
             self.past_scores[client_id] = []
+            self.past_scores[client_id].append(0)
+            self.od_scores[client_id] = []
+            self.od_scores[client_id].append(1)
+            self.accuracies[client_id] = []
+            self.accuracies[client_id].append(1)
+            self.bandwidths[client_id] = []
+            self.bandwidths[client_id].append(0)
+            self.probs[client_id] = []
+            self.probs[client_id].append(0)
+            self.client_times[client_id] = []
+            self.client_times[client_id].append(time.time() - self.server_start_time)
             self.start_times[client_id] = time.time() - self.server_start_time
+            self.server_times.append(time.time() - self.server_start_time)
+            self.total_bandwidth.append(0)
+
         print("Client with ID {} connected".format(client_id))
         return InitResponse(client_id=client_id)
-    
-    def plot_metrics(self):
-        # Ensure this function is called periodically in the server's main loop or a separate thread.
-        print("here")
-        try:
-            # Create a figure with two subplots
-            plt.figure(figsize=(12, 6))
-
-            # Plotting Object Detection Scores
-            plt.subplot(1, 2, 1)
-            for client_id, scores in self.past_scores.items():
-                if scores:
-                    relative_start_time = self.start_times.get(client_id, 0)
-                    averaged_scores = [np.mean(scores[i:i+10]) for i in range(0, len(scores), 10)]
-                    num_chunks = len(averaged_scores)
-                    time_offsets = [relative_start_time + i for i in range(num_chunks)]
-                    plt.plot(time_offsets, averaged_scores, label=f'Client {client_id}')
-            plt.title('Object Detection Scores')
-            plt.xlabel('Time')
-            plt.ylabel('Score')
-            plt.legend()
-
-            # Plotting Probability of Dropped Packets
-            plt.subplot(1, 2, 2)
-            client_ids = list(self.prob_dropping.keys())
-            probabilities = list(self.prob_dropping.values())
-            plt.bar(client_ids, probabilities, color='blue')
-            plt.title('Probability of Dropped Packets')
-            plt.xlabel('Client ID')
-            plt.ylabel('Probability')
-            plt.xticks(client_ids)
-
-            plt.tight_layout()
-            
-            # Save the plot to a file
-            plt.savefig('./server_metrics.png')
-            print("Plot saved to 'server_metrics.png'")
-            plt.close()
-        except Exception as e:
-            print(f"Error occurred during plotting: {e}")
 
     def close_connection(self, request: CloseRequest, context):
         with self.lock:
@@ -97,44 +92,158 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
                 del self.prob_dropping[request.client_id]
         print("Client with ID {} disconnected".format(request.client_id))
         return CloseResponse(client_id=request.client_id)
-    
-    def calculate_weighted_utilization(self, client_id):
-        # Calculate the average score for the client
-        avg_score = sum(self.past_scores[client_id]) / len(self.past_scores[client_id]) if self.past_scores[client_id] else 0
 
-        normalized_score = avg_score
+    def plot_metrics(self):
+        # Create a figure with two subplots
+        fig = plt.figure(figsize=(12, 6))
 
-        # Weighted utilization considers both utilization and object detection score
-        return self.connected_clients[client_id]["utilization"] * (1 + normalized_score)
+        # Plotting Object Detection Scores
+        plt.subplot(3, 2, 1)
+        total_bandwidth = self.total_bandwidth
+        averaged_bw = [np.mean(total_bandwidth[i:i+5]) for i in range(0, len(total_bandwidth), 5)]
+        times = [np.mean(self.server_times[i:i+5]) for i in range(0, len(self.server_times), 5)]
+
+        plt.plot(times, averaged_bw)
+        plt.title('Total Bandwidth over Time')
+        plt.xlabel('Time')
+        plt.ylabel('Total Bandwidth')
+
+        # Plotting Accuracy of Each Client
+        plt.subplot(3, 2, 2)
+        for client_id, acc in self.accuracies.items():
+            relative_start_time = self.start_times.get(client_id, 0)
+            averaged_acc = [np.mean(acc[i:i+5]) for i in range(0, len(acc), 5)]
+            times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
+            num_chunks = len(averaged_acc)
+            fps = self.connected_clients_plotting[client_id]['fps']
+            plt.plot(times, averaged_acc, label=f'Client FPS: {fps}')
+
+        plt.title('Accuracy of Each Client')
+        plt.xlabel('Time')
+        plt.ylabel('Accuracy')
+
+        # Plotting Bandwidth of Each Client
+        plt.subplot(3, 2, 3)
+        for client_id, bw in self.bandwidths.items():
+            relative_start_time = self.start_times.get(client_id, 0)
+            averaged_bw = [np.mean(bw[i:i+5]) for i in range(0, len(bw), 5)]
+            times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
+            num_chunks = len(averaged_bw)
+            fps = self.connected_clients_plotting[client_id]['fps']
+            plt.plot(times, averaged_bw, label=f'Client FPS: {fps}')
+
+        plt.title('Bandwidth of Each Client')
+        plt.xlabel('Time')
+        plt.ylabel('Bandwidth')
+
+        plt.subplot(3, 2, 4)
+        for client_id, score in self.od_scores.items():
+            relative_start_time = self.start_times.get(client_id, 0)
+            averaged_scores = [np.mean(score[i:i+5]) for i in range(0, len(score), 5)]
+            times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
+            num_chunks = len(averaged_scores)
+            fps = self.connected_clients_plotting[client_id]['fps']
+            plt.plot(times, averaged_scores, label=f'Client FPS: {fps}')
+
+        plt.title('Object Detection Scores of Each Client')
+        plt.xlabel('Time')
+        plt.ylabel('Score')
+
+        plt.subplot(3, 2, 5)
+        for client_id, prob in self.probs.items():
+            relative_start_time = self.start_times.get(client_id, 0)
+            averaged_prob = [np.mean(prob[i:i+5]) for i in range(0, len(prob), 5)]
+            times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
+            num_chunks = len(averaged_prob)
+            fps = self.connected_clients_plotting[client_id]['fps']
+            plt.plot(times, averaged_prob, label=f'Client FPS: {fps}')
+
+        plt.title('Probability of Dropping a Packet')
+        plt.xlabel('Time')
+        plt.ylabel('Probability')
+
+        handles, labels = plt.gca().get_legend_handles_labels()
+        fig.legend(handles, labels, loc='lower right')
+
+        plt.tight_layout()
+
+        # Save the plot to a file
+        plt.savefig('./server_metrics.png')
+        print("Plot saved to 'server_metrics.png'")
+        plt.close()
 
     def update_prob_dropping(self):
-        # TODO: This function decides the probability of dropping a request, basically the BW allocation
-        total_utilization = sum(self.calculate_weighted_utilization(client_id) 
-                                for client_id in self.connected_clients)
 
-        if total_utilization > BW:
-            print("Current load is {}, exceeding BW: {}".format(total_utilization, BW))
-            # sorted_clients = sorted(self.connected_clients.items(), key=lambda x: x[1]["utilization"], reverse=True)
-            # top_client = sorted_clients[0][0]
-            # self.prob_dropping[top_client] = 0.5
-            # print("Client {} probability of dropping has been updated to: ".format(top_client), self.prob_dropping[top_client])
-            weighted_utilization_proportions = {client_id: self.calculate_weighted_utilization(client_id) / total_utilization 
-                                                for client_id in self.connected_clients}
+        print("Current load is {}, BW: {}".format(self.current_load, BW))
 
+        prob = LpProblem("BandwidthAllocation", LpMaximize)
+        fps_vars = {client_id: LpVariable(f'fps_{client_id}', lowBound=1, upBound=100, cat='Continuous')
+                    for client_id in self.connected_clients}
+        requested_fps = {client_id: client['fps'] for client_id, client in self.connected_clients.items()}
+        accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
+                    for client_id in self.connected_clients}
+
+        for client_id in accuracy.keys():
+            self.od_scores[client_id].append(accuracy[client_id])
+            self.accuracies[client_id].append(accuracy[client_id]*(1-self.prob_dropping[client_id]))
+            self.client_times[client_id].append(time.time() - self.server_start_time)
+
+        # add feature to drop clients with accuracy or performance below a certain number (min bound = accu_thresh*1/request_fps)
+        for client_id in requested_fps:
+            if self.verbose:
+                print("id: ", client_id, " fps: ", requested_fps[client_id], " accuracy: ", accuracy[client_id])
+
+        # objective
+        prob += lpSum([fps_vars[client_id] * 1 / requested_fps[client_id]
+                       for client_id in self.connected_clients])
+
+        # BW constraint
+        prob += lpSum([fps_vars[client_id] * self.connected_clients[client_id]['size_each_frame']
+                       for client_id in self.connected_clients]) <= BW
+
+        # #total fps capped
+        # prob += lpSum([fps_vars[client_id] for client_id in self.connected_clients]) <= MAX_TOTAL_FPS
+
+        ADJUSTED_THRESHOLD = MIN_THRESHOLD_EACH * np.exp(-len(self.connected_clients)/10)
+
+        # #each fps capped
+        for client_id in self.connected_clients:
+            prob += fps_vars[client_id] <= self.connected_clients[client_id]['fps']
+
+        # each performance min capped
+        for client_id in self.connected_clients:
+            prob += fps_vars[client_id] * accuracy[client_id] / requested_fps[client_id] >= ADJUSTED_THRESHOLD
+
+        results = prob.solve(PULP_CBC_CMD(msg=0))
+        # if self.verbose: print(prob)
+        if LpStatus[results] == 'Optimal':
             for client_id in self.connected_clients:
-                inverse = 1 - weighted_utilization_proportions[client_id]
-                self.prob_dropping[client_id] = min(1, inverse)
+                if fps_vars[client_id].varValue is not None:
+                    self.prob_dropping[client_id] = 1.0 - fps_vars[client_id].varValue / requested_fps[client_id]
+                    print("Client {} probability of dropping has been updated to: ".format(client_id), self.prob_dropping[client_id])
 
-            # Log updated probabilities
-            for client_id, prob in self.prob_dropping.items():
-                print(f"Client {client_id} probability of dropping updated to: {prob}")
-        else:
-            print("Current load is {}, within BW: {}".format(self.current_load, BW))
-            sorted_prob_dropping = sorted(self.prob_dropping.items(), key=lambda x: x[1], reverse=True)
-            top_client = sorted_prob_dropping[0][0]
-            if self.prob_dropping[top_client] > 0:
-                self.prob_dropping[top_client] = 0
-                print("Client {} probability of dropping has been updated to: ".format(top_client), self.prob_dropping[top_client])
+    def update_prob_dropping_simple(self):
+        total_utilization = 0
+        accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
+                    for client_id in self.connected_clients}
+        for client_id in self.connected_clients:
+            b_i = max(1-accuracy[client_id], MIN_THRESHOLD_EACH)
+            total_utilization += self.connected_clients[client_id]["utilization"] * b_i
+            self.client_times[client_id].append(time.time() - self.server_start_time)
+
+        for client_id in self.connected_clients:
+            u_i = self.connected_clients[client_id]["utilization"]
+            b_i = max(1-accuracy[client_id], MIN_THRESHOLD_EACH)
+            bw_i = (u_i * b_i) / total_utilization * BW
+            p_i = max(0, 1 - bw_i/u_i)
+            self.prob_dropping[client_id] = p_i
+
+        for client_id in accuracy.keys():
+            self.od_scores[client_id].append(accuracy[client_id])
+            self.accuracies[client_id].append(accuracy[client_id]*(1-self.prob_dropping[client_id]))
+
+        for client_id, prob in self.prob_dropping.items():
+            print("Client: {client_id}, fps: {fps}, prob: {prob}".format(client_id=client_id, fps=self.connected_clients[client_id]["fps"], prob=prob))
 
     def detect(self, request: DetectRequest, context):
         with self.lock:
@@ -142,16 +251,32 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             self.connected_clients[request.client_id]["size_each_frame"] = len(request.frame_data)
             self.connected_clients[request.client_id]["utilization"] = self.connected_clients[request.client_id]["size_each_frame"] * self.connected_clients[request.client_id]["fps"]
 
+            self.connected_clients_plotting[request.client_id]["fps"] = request.fps
+            self.connected_clients_plotting[request.client_id]["size_each_frame"] = len(request.frame_data)
+            self.connected_clients_plotting[request.client_id]["utilization"] = self.connected_clients_plotting[request.client_id]["size_each_frame"] * self.connected_clients_plotting[request.client_id]["fps"]
+
             self.current_load = 0
             for client_id in self.connected_clients:
-                self.current_load += self.connected_clients[client_id]["utilization"] * (1-self.prob_dropping[client_id])
+                load = self.connected_clients[client_id]["utilization"] * (1-self.prob_dropping[client_id])
+                self.current_load += load
+                self.bandwidths[client_id].append(load)
+                self.probs[client_id].append(self.prob_dropping[client_id])
 
-            self.update_prob_dropping()
+            if USE_LP_OPTIMIZATION:
+                self.update_prob_dropping()
+            else:
+                self.update_prob_dropping_simple()
+
+            self.current_load = 0
+            for client_id in self.connected_clients:
+                load = self.connected_clients[client_id]["utilization"] * (1-self.prob_dropping[client_id])
+                self.current_load += load
+            self.total_bandwidth.append(self.current_load)
+            self.server_times.append(time.time() - self.server_start_time)
 
         if random.random() < self.prob_dropping[request.client_id]:
-            self.past_scores[request.client_id].append(0)
-            with self.lock:
-                self.current_load -= self.connected_clients[request.client_id]["utilization"] * self.prob_dropping[request.client_id]
+            if not USE_LP_OPTIMIZATION:
+                self.past_scores[request.client_id].append(0)
             res = DetectResponse(
                 client_id=request.client_id,
                 sequence_number=request.sequence_number,
@@ -166,8 +291,6 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
 
         bboxes, score = self.detector.detect(frame)
 
-        print(f"Client {request.client_id} OD Score: {score}")
-
         self.past_scores[request.client_id].append(score)
 
         res = DetectResponse(
@@ -177,22 +300,20 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             bboxes=bboxes
         )
 
-        with self.lock:
-            self.current_load -= self.connected_clients[request.client_id]["utilization"] * (1-self.prob_dropping[request.client_id])
-
         return res
+
 
 def start_plotting_thread(server_instance, interval=5):
     def plot():
         while not stop_plotting_thread.is_set():
             time.sleep(interval)
             server_instance.plot_metrics()
-            
 
     stop_plotting_thread = threading.Event()
     plotting_thread = threading.Thread(target=plot)
     plotting_thread.start()
     return stop_plotting_thread, plotting_thread
+
 
 if __name__ == '__main__':
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=MAX_CAMERAS))
