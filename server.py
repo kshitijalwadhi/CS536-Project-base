@@ -45,6 +45,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         self.bandwidths = {}
         self.server_start_time = time.time()
         self.start_times = {}
+        self.client_times = {}
 
     def init_client(self, request: InitRequest, context):
         with self.lock:
@@ -67,6 +68,8 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             self.bandwidths[client_id].append(0)
             self.probs[client_id] = []
             self.probs[client_id].append(0)
+            self.client_times[client_id] = []
+            self.client_times[client_id].append(time.time() - self.server_start_time)
             self.start_times[client_id] = time.time() - self.server_start_time
         print("Client with ID {} connected".format(client_id))
         return InitResponse(client_id=client_id)
@@ -80,14 +83,21 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         return CloseResponse(client_id=request.client_id)
 
     def plot_metrics(self):
-        # Ensure this function is called periodically in the server's main loop or a separate thread.
-
         # Create a figure with two subplots
         fig = plt.figure(figsize=(12, 6))
 
         # Plotting Object Detection Scores
         plt.subplot(3, 2, 1)
+        
         total_bandwidth = [sum(values) for values in zip(*self.bandwidths.values())]
+        print(len(total_bandwidth))
+        client_id = list(self.connected_clients.keys())[0] if self.connected_clients.keys() else 0
+        print(len(self.bandwidths))
+        print(len(self.client_times[client_id]))
+        if client_id:
+            times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
+        else:
+            times =[]
         averaged_bw = [np.mean(total_bandwidth[i:i+5]) for i in range(0, len(total_bandwidth), 5)]
 
         plt.plot(averaged_bw)
@@ -100,10 +110,11 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         for client_id, acc in self.accuracies.items():
             relative_start_time = self.start_times.get(client_id, 0)
             averaged_acc = [np.mean(acc[i:i+5]) for i in range(0, len(acc), 5)]
+            times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
             num_chunks = len(averaged_acc)
-            time_offsets = [relative_start_time + i for i in range(num_chunks)]
+            time_offsets = [relative_start_time + i for i in range(5, num_chunks+5)]
             fps = self.connected_clients[client_id]['fps']
-            plt.plot(time_offsets, averaged_acc, label=f'Client FPS: {fps}')
+            plt.plot(times, averaged_acc, label=f'Client FPS: {fps}')
 
         plt.title('Accuracy of Each Client')
         plt.xlabel('Time')
@@ -114,10 +125,11 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         for client_id, bw in self.bandwidths.items():
             relative_start_time = self.start_times.get(client_id, 0)
             averaged_bw = [np.mean(bw[i:i+5]) for i in range(0, len(bw), 5)]
+            times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
             num_chunks = len(averaged_bw)
-            time_offsets = [relative_start_time + i for i in range(num_chunks)]
+            time_offsets = [relative_start_time + i for i in range(5, num_chunks+5)]
             fps = self.connected_clients[client_id]['fps']
-            plt.plot(time_offsets, averaged_bw, label=f'Client FPS: {fps}')
+            plt.plot(times, averaged_bw, label=f'Client FPS: {fps}')
 
         plt.title('Bandwidth of Each Client')
         plt.xlabel('Time')
@@ -127,10 +139,11 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         for client_id, score in self.od_scores.items():
             relative_start_time = self.start_times.get(client_id, 0)
             averaged_scores = [np.mean(score[i:i+5]) for i in range(0, len(score), 5)]
+            times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
             num_chunks = len(averaged_scores)
-            time_offsets = [relative_start_time + i for i in range(num_chunks)]
+            time_offsets = [relative_start_time + i for i in range(5, num_chunks+5)]
             fps = self.connected_clients[client_id]['fps']
-            plt.plot(time_offsets, averaged_scores, label=f'Client FPS: {fps}')
+            plt.plot(times, averaged_scores, label=f'Client FPS: {fps}')
 
         plt.title('Object Detection Scores of Each Client')
         plt.xlabel('Time')
@@ -140,10 +153,11 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         for client_id, prob in self.probs.items():
             relative_start_time = self.start_times.get(client_id, 0)
             averaged_prob = [np.mean(prob[i:i+5]) for i in range(0, len(prob), 5)]
+            times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
             num_chunks = len(averaged_prob)
-            time_offsets = [relative_start_time + i for i in range(num_chunks)]
+            time_offsets = [relative_start_time + i for i in range(5, num_chunks+5)]
             fps = self.connected_clients[client_id]['fps']
-            plt.plot(time_offsets, averaged_prob, label=f'Client FPS: {fps}')
+            plt.plot(times, averaged_prob, label=f'Client FPS: {fps}')
 
         plt.title('Probability of Dropping a Packet')
         plt.xlabel('Time')
@@ -158,6 +172,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         plt.savefig('./server_metrics.png')
         print("Plot saved to 'server_metrics.png'")
         plt.close()
+        
 
     def update_prob_dropping(self):
 
@@ -173,6 +188,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         for client_id in accuracy.keys():
             self.od_scores[client_id].append(accuracy[client_id])
             self.accuracies[client_id].append(accuracy[client_id]*(1-self.prob_dropping[client_id]))
+            self.client_times[client_id].append(time.time() - self.server_start_time)
 
         # add feature to drop clients with accuracy or performance below a certain number (min bound = accu_thresh*1/request_fps)
         for client_id in requested_fps:
