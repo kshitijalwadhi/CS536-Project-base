@@ -24,7 +24,7 @@ import matplotlib
 matplotlib.use('Agg')
 
 
-USE_LP_OPTIMIZATION = True
+USE_LP_OPTIMIZATION = False
 
 ADJUSTED_THRESHOLD = MIN_THRESHOLD_EACH
 
@@ -210,17 +210,18 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
 
     def update_prob_dropping_simple(self):
         total_utilization = 0
+        accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
+                    for client_id in self.connected_clients}
         for client_id in self.connected_clients:
-            total_utilization += self.connected_clients[client_id]["utilization"]
+            b_i = max(1-accuracy[client_id], MIN_THRESHOLD_EACH)
+            total_utilization += self.connected_clients[client_id]["utilization"] * b_i
 
         for client_id in self.connected_clients:
             u_i = self.connected_clients[client_id]["utilization"]
-            bw_i = u_i / total_utilization * BW
+            b_i = max(1-accuracy[client_id], MIN_THRESHOLD_EACH)
+            bw_i = (u_i * b_i) / total_utilization * BW
             p_i = max(0, 1 - bw_i/u_i)
             self.prob_dropping[client_id] = p_i
-
-        accuracy = {client_id: np.mean(self.past_scores[client_id][-PAST_SCORE_N:]) if self.past_scores[client_id] else 0
-                    for client_id in self.connected_clients}
 
         for client_id in accuracy.keys():
             self.od_scores[client_id].append(accuracy[client_id])
