@@ -43,10 +43,12 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         self.accuracies = {}
         self.od_scores = {}
         self.verbose = 1
+        self.total_bandwidth = []
         self.bandwidths = {}
         self.server_start_time = time.time()
         self.start_times = {}
         self.client_times = {}
+        self.server_times = []
 
     def init_client(self, request: InitRequest, context):
         with self.lock:
@@ -77,6 +79,9 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             self.client_times[client_id] = []
             self.client_times[client_id].append(time.time() - self.server_start_time)
             self.start_times[client_id] = time.time() - self.server_start_time
+            self.server_times.append(time.time() - self.server_start_time)
+            self.total_bandwidth.append(0)
+
         print("Client with ID {} connected".format(client_id))
         return InitResponse(client_id=client_id)
 
@@ -94,19 +99,11 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
 
         # Plotting Object Detection Scores
         plt.subplot(3, 2, 1)
-        
-        total_bandwidth = [sum(values) for values in zip(*self.bandwidths.values())]
-        print(len(total_bandwidth))
-        client_id = list(self.connected_clients.keys())[0] if self.connected_clients.keys() else 0
-        print(len(self.bandwidths))
-        print(len(self.client_times[client_id]))
-        if client_id:
-            times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
-        else:
-            times =[]
+        total_bandwidth = self.total_bandwidth
         averaged_bw = [np.mean(total_bandwidth[i:i+5]) for i in range(0, len(total_bandwidth), 5)]
+        times = [np.mean(self.server_times[i:i+5]) for i in range(0, len(self.server_times), 5)]
 
-        plt.plot(averaged_bw)
+        plt.plot(times, averaged_bw)
         plt.title('Total Bandwidth over Time')
         plt.xlabel('Time')
         plt.ylabel('Total Bandwidth')
@@ -162,7 +159,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
             num_chunks = len(averaged_prob)
             time_offsets = [relative_start_time + i for i in range(num_chunks)]
-            fps = self.connected_clients[client_id]['fps']
+            fps = self.connected_clients_plotting[client_id]['fps']
             plt.plot(time_offsets, averaged_prob, label=f'Client FPS: {fps}')
 
         plt.title('Probability of Dropping a Packet')
@@ -237,6 +234,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         for client_id in self.connected_clients:
             b_i = max(1-accuracy[client_id], MIN_THRESHOLD_EACH)
             total_utilization += self.connected_clients[client_id]["utilization"] * b_i
+            self.client_times[client_id].append(time.time() - self.server_start_time)
 
         for client_id in self.connected_clients:
             u_i = self.connected_clients[client_id]["utilization"]
@@ -273,6 +271,13 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
                 self.update_prob_dropping()
             else:
                 self.update_prob_dropping_simple()
+            
+            self.current_load = 0
+            for client_id in self.connected_clients:
+                load = self.connected_clients[client_id]["utilization"] * (1-self.prob_dropping[client_id])
+                self.current_load += load
+            self.total_bandwidth.append(self.current_load)
+            self.server_times.append(time.time() - self.server_start_time)
 
         if random.random() < self.prob_dropping[request.client_id]:
             if not USE_LP_OPTIMIZATION:
