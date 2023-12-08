@@ -15,7 +15,7 @@ import sys
 
 
 class Client:
-    def __init__(self, server_address, client_fps):
+    def __init__(self, server_address, client_fps, video):
         self.channel = grpc.insecure_channel(server_address)
         self.stub = object_detection_pb2_grpc.DetectorStub(self.channel)
 
@@ -27,6 +27,8 @@ class Client:
 
         self.client_fps = client_fps
 
+        self.video = video
+
     def close_connection(self):
         req = CloseRequest(client_id=self.client_id)
         resp: CloseResponse = self.stub.close_connection(req)
@@ -36,7 +38,7 @@ class Client:
         print("Sending video...")
         time.sleep(1)
 
-        vs = FileVideoStream("data/sample.mp4").start()
+        vs = FileVideoStream(self.video).start()
 
         try:
             sequence_number = 0
@@ -78,7 +80,8 @@ class Client:
 
 
 if __name__ == '__main__':
-    fps = int(sys.argv[1])
-    client = Client('localhost:50051', fps)
+    video = sys.argv[1]
+    fps = int(sys.argv[2])
+    client = Client('localhost:50051', fps, video)
     client.send_video()
     client.close_connection()

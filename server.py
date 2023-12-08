@@ -24,7 +24,7 @@ import matplotlib
 matplotlib.use('Agg')
 
 
-USE_LP_OPTIMIZATION = False
+USE_LP_OPTIMIZATION = True
 
 ADJUSTED_THRESHOLD = MIN_THRESHOLD_EACH
 
@@ -115,7 +115,6 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             averaged_acc = [np.mean(acc[i:i+5]) for i in range(0, len(acc), 5)]
             times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
             num_chunks = len(averaged_acc)
-            time_offsets = [relative_start_time + i for i in range(5, num_chunks+5)]
             fps = self.connected_clients_plotting[client_id]['fps']
             plt.plot(times, averaged_acc, label=f'Client FPS: {fps}')
 
@@ -130,7 +129,6 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             averaged_bw = [np.mean(bw[i:i+5]) for i in range(0, len(bw), 5)]
             times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
             num_chunks = len(averaged_bw)
-            time_offsets = [relative_start_time + i for i in range(5, num_chunks+5)]
             fps = self.connected_clients_plotting[client_id]['fps']
             plt.plot(times, averaged_bw, label=f'Client FPS: {fps}')
 
@@ -144,7 +142,6 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             averaged_scores = [np.mean(score[i:i+5]) for i in range(0, len(score), 5)]
             times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
             num_chunks = len(averaged_scores)
-            time_offsets = [relative_start_time + i for i in range(5, num_chunks+5)]
             fps = self.connected_clients_plotting[client_id]['fps']
             plt.plot(times, averaged_scores, label=f'Client FPS: {fps}')
 
@@ -158,9 +155,8 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             averaged_prob = [np.mean(prob[i:i+5]) for i in range(0, len(prob), 5)]
             times = [np.mean(self.client_times[client_id][i:i+5]) for i in range(0, len(self.client_times[client_id]), 5)]
             num_chunks = len(averaged_prob)
-            time_offsets = [relative_start_time + i for i in range(num_chunks)]
             fps = self.connected_clients_plotting[client_id]['fps']
-            plt.plot(time_offsets, averaged_prob, label=f'Client FPS: {fps}')
+            plt.plot(times, averaged_prob, label=f'Client FPS: {fps}')
 
         plt.title('Probability of Dropping a Packet')
         plt.xlabel('Time')
@@ -175,7 +171,6 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         plt.savefig('./server_metrics.png')
         print("Plot saved to 'server_metrics.png'")
         plt.close()
-        
 
     def update_prob_dropping(self):
 
@@ -271,7 +266,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
                 self.update_prob_dropping()
             else:
                 self.update_prob_dropping_simple()
-            
+
             self.current_load = 0
             for client_id in self.connected_clients:
                 load = self.connected_clients[client_id]["utilization"] * (1-self.prob_dropping[client_id])
