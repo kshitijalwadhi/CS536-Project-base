@@ -34,6 +34,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
         super(Server, self).__init__()
         self.detector = detector
         self.connected_clients = {}
+        self.connected_clients_plotting = {}
         self.lock = Lock()
         self.current_load = 0
         self.prob_dropping = {}  # This is what will control our BW allocation
@@ -52,6 +53,11 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             while client_id in self.connected_clients:
                 client_id = random.randint(1, MAX_CAMERAS)
             self.connected_clients[client_id] = {
+                "fps": 1,
+                "size_each_frame": 1024,
+                "utilization": 1024
+            }
+            self.connected_clients_plotting[client_id] = {
                 "fps": 1,
                 "size_each_frame": 1024,
                 "utilization": 1024
@@ -102,7 +108,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             averaged_acc = [np.mean(acc[i:i+5]) for i in range(0, len(acc), 5)]
             num_chunks = len(averaged_acc)
             time_offsets = [relative_start_time + i for i in range(num_chunks)]
-            fps = self.connected_clients[client_id]['fps']
+            fps = self.connected_clients_plotting[client_id]['fps']
             plt.plot(time_offsets, averaged_acc, label=f'Client FPS: {fps}')
 
         plt.title('Accuracy of Each Client')
@@ -116,7 +122,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             averaged_bw = [np.mean(bw[i:i+5]) for i in range(0, len(bw), 5)]
             num_chunks = len(averaged_bw)
             time_offsets = [relative_start_time + i for i in range(num_chunks)]
-            fps = self.connected_clients[client_id]['fps']
+            fps = self.connected_clients_plotting[client_id]['fps']
             plt.plot(time_offsets, averaged_bw, label=f'Client FPS: {fps}')
 
         plt.title('Bandwidth of Each Client')
@@ -129,7 +135,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             averaged_scores = [np.mean(score[i:i+5]) for i in range(0, len(score), 5)]
             num_chunks = len(averaged_scores)
             time_offsets = [relative_start_time + i for i in range(num_chunks)]
-            fps = self.connected_clients[client_id]['fps']
+            fps = self.connected_clients_plotting[client_id]['fps']
             plt.plot(time_offsets, averaged_scores, label=f'Client FPS: {fps}')
 
         plt.title('Object Detection Scores of Each Client')
@@ -142,7 +148,7 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             averaged_prob = [np.mean(prob[i:i+5]) for i in range(0, len(prob), 5)]
             num_chunks = len(averaged_prob)
             time_offsets = [relative_start_time + i for i in range(num_chunks)]
-            fps = self.connected_clients[client_id]['fps']
+            fps = self.connected_clients_plotting[client_id]['fps']
             plt.plot(time_offsets, averaged_prob, label=f'Client FPS: {fps}')
 
         plt.title('Probability of Dropping a Packet')
@@ -235,6 +241,10 @@ class Server(object_detection_pb2_grpc.DetectorServicer):
             self.connected_clients[request.client_id]["fps"] = request.fps
             self.connected_clients[request.client_id]["size_each_frame"] = len(request.frame_data)
             self.connected_clients[request.client_id]["utilization"] = self.connected_clients[request.client_id]["size_each_frame"] * self.connected_clients[request.client_id]["fps"]
+
+            self.connected_clients_plotting[request.client_id]["fps"] = request.fps
+            self.connected_clients_plotting[request.client_id]["size_each_frame"] = len(request.frame_data)
+            self.connected_clients_plotting[request.client_id]["utilization"] = self.connected_clients_plotting[request.client_id]["size_each_frame"] * self.connected_clients_plotting[request.client_id]["fps"]
 
             self.current_load = 0
             for client_id in self.connected_clients:
